@@ -1,27 +1,27 @@
 # ── Core ──────────────────────────────────────────────────────────────────────
-fastapi==0.111.0
-uvicorn[standard]==0.29.0
+fastapi==0.115.12
+uvicorn[standard]==0.34.0
 python-dotenv==1.0.1
-requests==2.31.0
+requests==2.32.3
 
 # ── Base de datos ─────────────────────────────────────────────────────────────
-# sqlite3 viene en stdlib de Python 3.11, no necesita instalación
+# sqlite3 viene en stdlib de Python, no necesita instalación
 
-# ── ML ────────────────────────────────────────────────────────────────────────
-scikit-learn==1.4.2
-pandas==2.2.2
-numpy==1.26.4
+# ── ML (compatible con Python 3.13) ──────────────────────────────────────────
+scikit-learn==1.6.1
+pandas==2.2.3
+numpy==2.2.4
 joblib==1.4.2
 
 # ── Polymarket SDK ────────────────────────────────────────────────────────────
 py-clob-client==0.14.0
 
 # ── Scheduling ────────────────────────────────────────────────────────────────
-schedule==1.2.1
+schedule==1.2.2
 
 # ── HTTP / Retry ──────────────────────────────────────────────────────────────
-urllib3==2.2.1
+urllib3==2.3.0
 
 # ── Testing ───────────────────────────────────────────────────────────────────
-pytest==8.2.0
-pytest-asyncio==0.23.6
+pytest==8.3.5
+pytest-asyncio==0.25.3

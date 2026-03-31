@@ -21,8 +21,8 @@ build/
 # Modelo entrenado (regenerable con train_model.py)
 backend/model/model.pkl
 
-# Datos descargados (regenerables)
-data/
+# Datos descargados (regenerables — caché local de Oracle's Elixir)
+data/oracle_elixir_cache/
 
 # IDE
 .idea/

@@ -22,10 +22,17 @@ import requests
 logger = logging.getLogger(__name__)
 
 # ── URLs de descarga ───────────────────────────────────────────────────────────
-# Oracle's Elixir publica CSVs anuales en S3 público
-S3_BASE = (
-    "https://oracleselixir-downloadable-match-data.s3-us-west-2.amazonaws.com"
-)
+# Oracle's Elixir usa Google Drive como mirror público (S3 fue deprecado).
+# IDs obtenidos de HerrKurz/Esports_Data_Pipeline/config.py
+GDRIVE_BASE = "https://drive.google.com/uc?export=download&confirm=t&id="
+GDRIVE_IDS: dict[int, str] = {
+    2025: "1v6LRphp2kYciU4SXp0PCjEMuev1bDejc",
+    2024: "1IjIEhLc9n8eLKeY-yh_YigKVWbhgGBsN",
+    2023: "1XXk2LO0CsNADBB1LRGOV5rUpyZdEZ8s2",
+    2022: "1EHmptHyzY8owv0BAcNKtkQpMwfkURwRy",
+    2021: "1fzwTTz77hcnYjOnO9ONeoPrkWCoOSecA",
+    2020: "1dlSIczXShnv1vIfGNvBjgk-thMKA5j7d",
+}
 YEARS = [2021, 2022, 2023, 2024, 2025]
 
 # Caché local para no re-descargar en cada run
@@ -53,7 +60,11 @@ TARGET_COL = "result"
 # ── Descarga ───────────────────────────────────────────────────────────────────
 
 def _csv_url(year: int) -> str:
-    return f"{S3_BASE}/{year}_LoL_esports_match_data_from_OraclesElixir.csv"
+    """Retorna la URL de Google Drive para el CSV de un año dado."""
+    gdrive_id = GDRIVE_IDS.get(year)
+    if not gdrive_id:
+        return ""
+    return f"{GDRIVE_BASE}{gdrive_id}"
 
 
 def _cache_path(year: int) -> Path:
@@ -70,26 +81,65 @@ def _download_year(year: int, force: bool = False) -> pd.DataFrame:
         return pd.read_csv(path, low_memory=False)
 
     url = _csv_url(year)
-    logger.info("Descargando %s …", url)
+    if not url:
+        logger.warning("Año %d no tiene URL configurada.", year)
+        return pd.DataFrame()
+
+    logger.info("Descargando año %d desde Google Drive …", year)
+
+    # Google Drive a veces redirige a una página de confirmación de virus
+    # El parámetro confirm=t ya está en la URL, pero usamos una sesión
+    # para seguir la redirección correctamente
+    session = requests.Session()
+    session.headers.update({"User-Agent": "Mozilla/5.0"})
 
     for attempt in range(3):
         try:
-            resp = requests.get(url, timeout=120)
+            resp = session.get(url, timeout=180, allow_redirects=True)
+
             if resp.status_code == 200:
-                path.write_bytes(resp.content)
-                return pd.read_csv(io.BytesIO(resp.content), low_memory=False)
+                # Verificar que es CSV y no una página HTML de error de Drive
+                content_type = resp.headers.get("Content-Type", "")
+                content = resp.content
+
+                if b"<!DOCTYPE html>" in content[:500]:
+                    # Google Drive mostró página de confirmación
+                    # Intentar con URL alternativa
+                    logger.warning(
+                        "Año %d: Google Drive retornó HTML, intentando URL alternativa…",
+                        year,
+                    )
+                    alt_url = (
+                        f"https://drive.google.com/uc?export=download"
+                        f"&id={GDRIVE_IDS[year]}&confirm=1"
+                    )
+                    resp2 = session.get(alt_url, timeout=180)
+                    if resp2.status_code == 200 and b"<!DOCTYPE html>" not in resp2.content[:500]:
+                        content = resp2.content
+                    else:
+                        raise ValueError("Google Drive retornó HTML en ambas URLs")
+
+                path.write_bytes(content)
+                df = pd.read_csv(io.BytesIO(content), low_memory=False)
+                logger.info("Año %d descargado: %d filas", year, len(df))
+                return df
+
             elif resp.status_code == 404:
-                logger.warning("Año %d no disponible aún (404).", year)
+                logger.warning("Año %d no disponible (404).", year)
                 return pd.DataFrame()
             else:
                 raise requests.HTTPError(f"HTTP {resp.status_code}")
+
         except Exception as exc:
             wait = 2 ** attempt
-            logger.warning("Intento %d fallido para %d: %s — reintento en %ds",
-                           attempt + 1, year, exc, wait)
-            time.sleep(wait)
+            logger.warning(
+                "Intento %d/%d fallido para año %d: %s — reintento en %ds",
+                attempt + 1, 3, year, exc, wait,
+            )
+            if attempt < 2:
+                time.sleep(wait)
 
-    logger.error("No se pudo descargar el año %d.", year)
+    logger.error("No se pudo descargar el año %d tras 3 intentos.", year)
     return pd.DataFrame()
 
 

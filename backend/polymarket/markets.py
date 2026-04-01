@@ -180,8 +180,8 @@ def get_lol_markets(
         result.append(market)
 
     logger.info(
-        "Mercados válidos para operar: %d "
-        "(liquidez ≥ $%.0f, cierre ≥ %d min)",
+        "Mercados validos para operar: %d "
+        "(liquidez >= $%.0f, cierre >= %d min)",
         len(result), min_liquidity, min_close_minutes,
     )
     return result

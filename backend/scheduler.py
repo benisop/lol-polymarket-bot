@@ -246,7 +246,7 @@ def _run_cycle() -> dict:
                 )
                 cycle_stats["trades"] += 1
                 logger.info(
-                    "✅ Trade %s | %s | $%.2f | edge=%.2f%% | dry=%s",
+                    "[TRADE] %s | %s | $%.2f | edge=%.2f%% | dry=%s",
                     slug, side, size_usd, edge * 100, DRY_RUN,
                 )
 
@@ -317,7 +317,7 @@ def run(max_cycles: int | None = None) -> None:
     while True:
         cycle += 1
         now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-        logger.info("─── Ciclo #%d (%s) ───────────────────────────────────", cycle, now)
+        logger.info("=== Ciclo #%d (%s) ===", cycle, now)
 
         # Stop-loss check
         if _check_stop_loss():
@@ -328,7 +328,7 @@ def run(max_cycles: int | None = None) -> None:
         try:
             stats = _run_cycle()
             logger.info(
-                "Ciclo #%d completado → mercados=%d mapeados=%d "
+                "Ciclo #%d completado | mercados=%d mapeados=%d "
                 "stats=%d señales=%d trades=%d errores=%d",
                 cycle,
                 stats["markets_checked"], stats["games_mapped"],
@@ -345,17 +345,21 @@ def run(max_cycles: int | None = None) -> None:
             break
 
         # Esperar hasta el próximo ciclo
-        logger.info("Próximo ciclo en %ds …", SCHEDULER_INTERVAL_SECONDS)
+        logger.info("Proximo ciclo en %ds...", SCHEDULER_INTERVAL_SECONDS)
         time.sleep(SCHEDULER_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":
+    import sys
+    # Forzar UTF-8 en la consola Windows (cp1252 no soporta caracteres especiales)
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.stream.reconfigure(encoding="utf-8", errors="replace")
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
         handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler("bot_d.log"),
+            stream_handler,
+            logging.FileHandler("bot_d.log", encoding="utf-8"),
         ],
     )
     run()

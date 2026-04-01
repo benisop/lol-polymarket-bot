@@ -20,8 +20,9 @@ from backend.data.lolesports_api import (
 
 @pytest.mark.parametrize("slug,expected", [
     (
+        # Sin "lck"/"lec" explícito en el slug → league=None es correcto
         "lol-t1-gen-g-2026-03-30-game1",
-        {"date": "2026-03-30", "game_num": 1, "league": "LCK"},
+        {"date": "2026-03-30", "game_num": 1, "league": None},
     ),
     (
         "lol-lck-kt-rolster-drx-2026-03-29-game2",

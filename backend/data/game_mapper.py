@@ -82,12 +82,15 @@ def parse_slug(slug: str) -> dict | None:
     """
     Parsea un slug de Polymarket y extrae los campos relevantes.
 
-    Ejemplos de slugs válidos:
-        lol-t1-gen-g-2026-03-30-game1
+    Formatos observados en Polymarket (Abril 2026):
+        lol-t1-gen-g-2026-03-30-game1          (formato original esperado)
         lol-lck-t1-geng-game-1-2026-03-30
-        will-t1-win-vs-gen-g-lck-2026-03-30
+        lec-g2-esports-vs-giantx               (LEC sin fecha)
+        lec-movistar-vs-fnatic                 (LEC sin fecha)
+        lol-blg-vs-tes                         (LoL sin fecha ni liga)
+        lol-dnfc-vs-bfxy-2025-09-23            (LoL con fecha)
 
-    Retorna dict con: team1, team2, date (YYYY-MM-DD), game_num, league
+    Retorna dict con: team1, team2, date (YYYY-MM-DD o None), game_num, league
     o None si no se puede parsear.
     """
     slug = slug.lower()
@@ -99,24 +102,26 @@ def parse_slug(slug: str) -> dict | None:
     elif "lec" in slug:
         league = "LEC"
 
-    # Extraer fecha YYYY-MM-DD
+    # Extraer fecha YYYY-MM-DD (opcional en los nuevos formatos)
     date_match = re.search(r"(\d{4})-(\d{2})-(\d{2})", slug)
+    date_str = date_match.group(0) if date_match else datetime.now().strftime("%Y-%m-%d")
     if not date_match:
-        logger.warning("No se encontró fecha en slug: %s", slug)
-        return None
-    date_str = date_match.group(0)
+        logger.info("Slug sin fecha explícita '%s', usando fecha de hoy: %s",
+                    slug, date_str)
 
     # Extraer número de game (game1, game2, game-1, game-2, etc.)
     game_match = re.search(r"game[-_]?(\d)", slug)
     game_num = int(game_match.group(1)) if game_match else 1
 
-    # Extraer equipos: parte del slug sin "lol-", sin fecha, sin "game-N"
+    # Extraer equipos: limpiar prefijos, fechas y ruido
     core = slug
-    core = re.sub(r"lol-?", "", core)
-    core = re.sub(r"lck-?|lec-?", "", core)
+    core = re.sub(r"^lol-", "", core)           # quitar "lol-" al inicio
+    core = re.sub(r"^lec-", "", core)           # quitar "lec-" al inicio
+    core = re.sub(r"^lck-", "", core)           # quitar "lck-" al inicio
+    core = re.sub(r"lck-?|lec-?", "", core)     # quitar lck/lec internos
     core = re.sub(r"\d{4}-\d{2}-\d{2}", "", core)
     core = re.sub(r"game[-_]?\d", "", core)
-    core = re.sub(r"will-|-win|-vs|-match", "", core)
+    core = re.sub(r"will-|-win|-match", "", core)
     core = core.strip("-").strip()
 
     # Los equipos están separados por "-vs-" o simplemente "-"
@@ -125,7 +130,7 @@ def parse_slug(slug: str) -> dict | None:
     else:
         # Heurística: dividir a la mitad
         tokens = [t for t in core.split("-") if t]
-        mid = len(tokens) // 2
+        mid = max(1, len(tokens) // 2)
         parts = ["-".join(tokens[:mid]), "-".join(tokens[mid:])]
 
     if len(parts) < 2:

@@ -42,8 +42,21 @@ def test_parse_slug_fecha_y_game(slug, expected):
 
 
 def test_parse_slug_sin_fecha():
-    result = parse_slug("lol-t1-geng-game1")
-    assert result is None
+    # Nuevo formato real de Polymarket: slugs sin fecha usan fecha de hoy
+    result = parse_slug("lec-g2-esports-vs-giantx")
+    assert result is not None
+    assert result["league"] == "LEC"
+    assert result["date"] is not None   # usa fecha de hoy como fallback
+
+
+def test_parse_slug_formato_lec_vs():
+    # "lec-movistar-vs-fnatic" — formato real observado en Abril 2026
+    result = parse_slug("lec-movistar-vs-fnatic")
+    assert result is not None
+    assert result["league"] == "LEC"
+    # equipos extraídos
+    assert result["team1"] != ""
+    assert result["team2"] != ""
 
 
 def test_parse_slug_detecta_liga_lck():

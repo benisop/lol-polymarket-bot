@@ -17,14 +17,49 @@ logger = logging.getLogger(__name__)
 
 GAMMA_API_URL  = "https://gamma-api.polymarket.com/markets"
 CLOB_API_URL   = "https://clob.polymarket.com"
-LOL_SLUG_KEYS  = ("lol-lck", "lol-lec")
+
+# Formatos reales observados en Polymarket (Abril 2026):
+#   "lec-g2-esports-vs-giantx"          → LEC sin fecha
+#   "lec-movistar-vs-fnatic"            → LEC sin fecha
+#   "lol-blg-vs-tes"                    → LoL genérico
+#   "lol-dnfc-vs-bfxy-2025-09-23"       → LoL con fecha
+#   "lol-lck-t1-geng-game1"             → formato antiguo esperado
+LOL_SLUG_KEYS  = (
+    "lol-lck", "lol-lec",   # formato original
+    "lec-",                  # mercados LEC directos
+    "lck-",                  # mercados LCK directos (por si acaso)
+)
+# Palabras clave adicionales en la question para identificar LCK/LEC
+LOL_QUESTION_KEYS = ("lck", "lec", "league of legends", " lol ")
 MIN_CLOSE_MINS = 10   # no operar si cierra en menos de 10 minutos
 
 
 def _is_lol_market(market: dict) -> bool:
-    """True si el slug contiene lol-lck o lol-lec."""
-    slug = (market.get("slug") or "").lower()
-    return any(key in slug for key in LOL_SLUG_KEYS)
+    """
+    True si es un mercado de LoL LCK o LEC.
+    Cubre todos los formatos de slug observados en Polymarket.
+    """
+    slug     = (market.get("slug")     or "").lower()
+    question = (market.get("question") or "").lower()
+
+    # Filtrar LPL (China) — solo queremos LCK y LEC
+    lpl_keys = ("lpl", "lol-lpl", "-lpl-", "blg", "tes", "jdg", "lng",
+                 "weibo", "omg", "bfxy", "czv", "nbs", "anc", "mcn")
+    if any(k in slug for k in lpl_keys):
+        return False
+
+    # Verificar si es LEC/LCK por slug
+    if any(key in slug for key in LOL_SLUG_KEYS):
+        return True
+
+    # Verificar por question si el slug no es suficiente
+    if any(key in question for key in LOL_QUESTION_KEYS):
+        # Excluir Worlds y otras competencias no regulares
+        if any(exc in slug for exc in ("worlds", "msi", "all-star")):
+            return False
+        return True
+
+    return False
 
 
 def _minutes_to_close(market: dict) -> float | None:

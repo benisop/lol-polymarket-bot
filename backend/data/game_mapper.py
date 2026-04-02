@@ -166,6 +166,31 @@ def parse_slug(slug: str) -> dict | None:
 
 # ── getLive: única fuente fiable de gameIds ────────────────────────────────────
 
+# Cache de getLive por ciclo — se llama UNA VEZ y se reutiliza para todos los mercados
+_live_cache: list[dict] = []
+_live_cache_ts: float = 0.0
+LIVE_CACHE_TTL: float = 240.0   # válido por 4 minutos (un ciclo completo)
+
+
+def refresh_live_cache() -> None:
+    """Llama a getLive UNA vez y guarda el resultado. Llamar al inicio de cada ciclo."""
+    global _live_cache, _live_cache_ts
+    try:
+        resp = requests.get(
+            "https://esports-api.lolesports.com/persisted/gw/getLive",
+            headers=SCHEDULE_HEADERS,
+            params={"hl": "en-US"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        _live_cache = resp.json().get("data", {}).get("schedule", {}).get("events", [])
+        _live_cache_ts = time.time()
+        logger.info("getLive cache: %d partidos en vivo.", len(_live_cache))
+    except Exception as exc:
+        logger.error("Error refreshing live cache: %s", exc)
+        _live_cache = []
+
+
 def _get_live_game_id(team1: str, team2: str, league: str | None) -> str | None:
     """
     Consulta getLive para encontrar el gameId de un partido en curso.
@@ -180,14 +205,10 @@ def _get_live_game_id(team1: str, team2: str, league: str | None) -> str | None:
     t2 = _norm(team2)
 
     try:
-        resp = requests.get(
-            "https://esports-api.lolesports.com/persisted/gw/getLive",
-            headers=SCHEDULE_HEADERS,
-            params={"hl": "en-US"},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        events = resp.json().get("data", {}).get("schedule", {}).get("events", [])
+        # Usar cache del ciclo — NO hacer HTTP request por cada mercado
+        if time.time() - _live_cache_ts > LIVE_CACHE_TTL:
+            refresh_live_cache()
+        events = _live_cache
 
         for event in events:
             # Filtrar por liga si conocemos cuál es
@@ -323,12 +344,8 @@ def get_game_id(slug: str) -> str | None:
     )
 
     # 3. getLive — única fuente fiable de gameIds en tiempo real
+    # Si el partido no está live, retorna None inmediatamente (sin más API calls)
     game_id = _get_live_game_id(team1, team2, league)
-
-    # 4. Fallback Leaguepedia (RiotGameId) para partidos recién terminados
-    if not game_id:
-        logger.debug("getLive sin resultado, probando Leaguepedia RiotGameId...")
-        game_id = _leaguepedia_fallback(team1, team2, date_str)
 
     # 6. Cachear si encontramos
     if game_id:

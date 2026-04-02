@@ -65,6 +65,29 @@ def _is_lol_market(market: dict) -> bool:
     if not re.search(r'\d{4}-\d{2}-\d{2}', slug):
         return False
 
+    # Excluir props y mercados especiales (solo queremos winner markets)
+    PROP_KEYS = (
+        "slay-baron", "slay-dragon", "destroy-inhibitor", "quadra-kill",
+        "penta-kill", "odd-even", "first-blood", "first-dragon", "first-tower",
+        "first-herald", "game-duration", "total-kills", "first-baron",
+        "most-kills", "most-assists", "both-teams",
+        # Props adicionales observados en Polymarket
+        "total-games",    # e.g. lol-dk-ns-2026-04-02-total-games-2pt5
+        "handicap",       # e.g. lol-dk-ns-2026-04-02-game-handicap-away-1pt5
+        "kill-over",      # e.g. lol-dk-ns-2026-04-02-game1-kill-over-29pt5
+        "kill-under",
+        "odd-even",
+        "any-player",     # e.g. any-player-quadra-kill
+        "destroy-inhib",
+    )
+    if any(k in slug for k in PROP_KEYS):
+        return False
+
+    # Solo mercados winner (game1, game2, game3, o sin sufijo especial)
+    # Rechazar si contiene tokens de props no listados arriba
+    if re.search(r'-\d+pt\d+', slug):  # e.g. "2pt5", "1pt5", "29pt5"
+        return False
+
     # Excluir mercados de temporada/outright
     if any(k in slug for k in SEASON_EXCLUDE_KEYS):
         return False

@@ -7,6 +7,7 @@ Endpoint:
 """
 
 import logging
+import re
 from datetime import datetime, timezone, timedelta
 
 import requests
@@ -29,37 +30,55 @@ LOL_SLUG_KEYS  = (
     "lec-",                  # mercados LEC directos
     "lck-",                  # mercados LCK directos (por si acaso)
 )
-# Palabras clave adicionales en la question para identificar LCK/LEC
-LOL_QUESTION_KEYS = ("lck", "lec", "league of legends", " lol ")
+# Patrones regex para question (word boundaries para evitar "election" → "lec")
+LOL_QUESTION_PATTERNS = [
+    re.compile(r'\blck\b', re.IGNORECASE),
+    re.compile(r'\blec\b', re.IGNORECASE),
+    re.compile(r'league of legends', re.IGNORECASE),
+    re.compile(r'\blol\b', re.IGNORECASE),
+]
 MIN_CLOSE_MINS = 10   # no operar si cierra en menos de 10 minutos
+
+# Tags a consultar en Gamma API
+GAMMA_TAGS = ["league-of-legends", "esports"]
+
+# Excluir mercados de temporada/outright — el modelo solo opera partidos individuales
+SEASON_EXCLUDE_KEYS = (
+    "season-winner", "season-playoffs", "playoffs-winner",
+    "championship-winner", "worlds-", "msi-", "all-star-",
+    "will-win-the-lck-2026", "will-win-the-lec-2026",
+    "will-win-the-lck-2025", "will-win-the-lec-2025",
+)
 
 
 def _is_lol_market(market: dict) -> bool:
     """
-    True si es un mercado de LoL LCK o LEC.
-    Cubre todos los formatos de slug observados en Polymarket.
+    True si es un mercado de partido individual LCK o LEC.
+    Lógica: la question debe mencionar LCK o LEC Y el slug debe tener fecha.
+    Excluye: season outright, LCS, LPL, Worlds, Forsen y similares.
     """
-    slug     = (market.get("slug")     or "").lower()
-    question = (market.get("question") or "").lower()
+    slug        = (market.get("slug")          or "").lower()
+    question    = (market.get("question")      or "").lower()
+    event_title = (market.get("_event_title")  or "").lower()
 
-    # Filtrar LPL (China) — solo queremos LCK y LEC
-    lpl_keys = ("lpl", "lol-lpl", "-lpl-", "blg", "tes", "jdg", "lng",
-                 "weibo", "omg", "bfxy", "czv", "nbs", "anc", "mcn")
-    if any(k in slug for k in lpl_keys):
+    # Solo partidos individuales: el slug debe tener formato con fecha YYYY-MM-DD
+    if not re.search(r'\d{4}-\d{2}-\d{2}', slug):
         return False
 
-    # Verificar si es LEC/LCK por slug
-    if any(key in slug for key in LOL_SLUG_KEYS):
-        return True
+    # Excluir mercados de temporada/outright
+    if any(k in slug for k in SEASON_EXCLUDE_KEYS):
+        return False
 
-    # Verificar por question si el slug no es suficiente
-    if any(key in question for key in LOL_QUESTION_KEYS):
-        # Excluir Worlds y otras competencias no regulares
-        if any(exc in slug for exc in ("worlds", "msi", "all-star")):
-            return False
-        return True
+    # Excluir Worlds, MSI, All-Star
+    if any(exc in slug for exc in ("worlds", "msi", "all-star")):
+        return False
 
-    return False
+    # LCK o LEC debe aparecer en question O en el título del evento padre
+    combined = question + " " + event_title
+    if not (re.search(r'\blck\b', combined) or re.search(r'\blec\b', combined)):
+        return False
+
+    return True
 
 
 def _minutes_to_close(market: dict) -> float | None:
@@ -132,13 +151,13 @@ def _parse_market(raw: dict) -> dict:
     }
 
 
-def _fetch_page(offset: int = 0, limit: int = 100) -> list[dict]:
-    """Descarga una página de mercados de Gamma API."""
+def _fetch_page(offset: int = 0, limit: int = 100, tag: str = "league-of-legends") -> list[dict]:
+    """Descarga una página de mercados de Gamma API (/markets)."""
     try:
         resp = requests.get(
             GAMMA_API_URL,
             params={
-                "tag_slug": "esports",
+                "tag_slug": tag,
                 "active":   "true",
                 "limit":    limit,
                 "offset":   offset,
@@ -147,13 +166,53 @@ def _fetch_page(offset: int = 0, limit: int = 100) -> list[dict]:
         )
         resp.raise_for_status()
         data = resp.json()
-        # Gamma API puede retornar lista directa o dict con 'markets'
         if isinstance(data, list):
             return data
         return data.get("markets", data.get("results", []))
     except Exception as exc:
-        logger.error("Error consultando Gamma API (offset=%d): %s", offset, exc)
+        logger.error("Error consultando Gamma API markets (tag=%s offset=%d): %s", tag, offset, exc)
         return []
+
+
+def _fetch_events_markets(tag: str = "league-of-legends") -> list[dict]:
+    """
+    Consulta el endpoint /events y extrae los mercados individuales.
+    Gamma API agrupa per-match markets bajo events — necesario para LCK/LEC.
+    """
+    markets_from_events: list[dict] = []
+    try:
+        resp = requests.get(
+            "https://gamma-api.polymarket.com/events",
+            params={
+                "tag_slug": tag,
+                "active":   "true",
+                "closed":   "false",
+                "limit":    100,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        events = resp.json()
+        if not isinstance(events, list):
+            events = events.get("events", [])
+
+        for event in events:
+            event_title = (event.get("title") or "").lower()
+            inner = event.get("markets", [])
+            for m in inner:
+                if not m.get("endDate") and event.get("endDate"):
+                    m["endDate"] = event["endDate"]
+                # Propagar título del evento para detectar LCK/LEC en game1/game2
+                if not m.get("_event_title"):
+                    m["_event_title"] = event_title
+                markets_from_events.append(m)
+
+        logger.info("Events API (tag=%s): %d markets extraidos de %d eventos.",
+                    tag, len(markets_from_events), len(events))
+    except Exception as exc:
+        logger.error("Error consultando Gamma API events (tag=%s): %s", tag, exc)
+
+    return markets_from_events
 
 
 def get_lol_markets(
@@ -175,18 +234,32 @@ def get_lol_markets(
         min_liquidity = MIN_MARKET_LIQUIDITY
 
     all_markets: list[dict] = []
-    offset = 0
-    limit  = 100
+    seen_slugs: set[str] = set()
 
-    # Paginado: máx 500 mercados por seguridad
-    while offset < 500:
-        page = _fetch_page(offset=offset, limit=limit)
-        if not page:
-            break
-        all_markets.extend(page)
-        if len(page) < limit:
-            break
-        offset += limit
+    def _add(m: dict) -> None:
+        slug = m.get("slug", "")
+        if slug and slug not in seen_slugs:
+            seen_slugs.add(slug)
+            all_markets.append(m)
+
+    # 1. Endpoint /events — captura per-match y season markets
+    for tag in GAMMA_TAGS:
+        for m in _fetch_events_markets(tag):
+            _add(m)
+
+    # 2. Endpoint /markets — por si hay mercados no agrupados en events
+    for tag in GAMMA_TAGS:
+        offset = 0
+        limit  = 100
+        while offset < 500:
+            page = _fetch_page(offset=offset, limit=limit, tag=tag)
+            if not page:
+                break
+            for m in page:
+                _add(m)
+            if len(page) < limit:
+                break
+            offset += limit
 
     logger.info("Gamma API: %d mercados totales descargados.", len(all_markets))
 
@@ -200,16 +273,17 @@ def get_lol_markets(
         market = _parse_market(raw)
 
         if market["closed"]:
+            logger.info("Descartado (closed=True): %s", market["slug"])
             continue
         if market["liquidity"] < min_liquidity:
-            logger.debug("Descartado (liquidez $%.0f < $%.0f): %s",
-                         market["liquidity"], min_liquidity, market["slug"])
+            logger.info("Descartado (liquidez $%.0f < $%.0f): %s",
+                        market["liquidity"], min_liquidity, market["slug"])
             continue
 
         mins = market["minutes_to_close"]
         if mins is not None and mins < min_close_minutes:
-            logger.debug("Descartado (cierra en %.1f min): %s",
-                         mins, market["slug"])
+            logger.info("Descartado (cierra en %.1f min): %s",
+                        mins, market["slug"])
             continue
 
         result.append(market)

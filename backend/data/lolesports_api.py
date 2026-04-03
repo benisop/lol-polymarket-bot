@@ -10,7 +10,7 @@ Endpoints:
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from functools import lru_cache
 
@@ -32,6 +32,10 @@ _last_request: dict[str, float] = {}
 # Caché de resultados por ciclo — evita múltiples HTTP calls al mismo gameId
 _stats_cache: dict[str, tuple[float, dict | None]] = {}   # gameId → (ts, result)
 STATS_CACHE_TTL = 60.0   # reusar resultado si tiene menos de 60 segundos
+
+# Caché de tiempos de inicio de juego — inferidos del primer frame al detectar el game
+# La API no incluye gameStartTime en metadata; lo derivamos del primer frame (gold=0)
+_game_start_times: dict[str, datetime] = {}   # gameId -> datetime UTC
 
 
 def _parse_ts(ts_str: str) -> datetime | None:
@@ -91,6 +95,22 @@ def _get_with_retry(url: str, params: dict | None = None) -> dict | None:
 
 # ── Funciones principales ──────────────────────────────────────────────────────
 
+def _ts_from_frame(frame: dict) -> str:
+    """Extrae el timestamp de un frame — soporta rfc460Timestamp (ISO) y rfc822Timestamp."""
+    return frame.get("rfc460Timestamp") or frame.get("rfc822Timestamp", "")
+
+
+def _current_window_params() -> dict:
+    """
+    Retorna params para la window API para traer frames de los últimos 3 minutos.
+    startingTime debe ser divisible por 10 segundos (requerimiento de la API).
+    """
+    now = datetime.now(timezone.utc)
+    sec_rounded = (now.second // 10) * 10
+    window_start = now.replace(second=sec_rounded, microsecond=0) - timedelta(minutes=3)
+    return {"startingTime": window_start.strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+
 def get_live_stats(game_id: str) -> dict | None:
     """
     Obtiene el frame más reciente de stats en vivo para un gameId.
@@ -112,10 +132,36 @@ def get_live_stats(game_id: str) -> dict | None:
             "raw_frame": dict,     # frame completo para extract_minute15_stats
         }
     o None si no hay datos disponibles.
+
+    Notas de API:
+      - Los frames usan "rfc460Timestamp" (ISO-8601), NO "rfc822Timestamp".
+      - "gameStartTime" no aparece en la metadata → se infiere del primer frame
+        consultando sin startingTime (la API devuelve frames desde el inicio).
+      - Consultas posteriores usan startingTime=ahora-3min para datos actuales.
     """
     _rate_limit(game_id)
     url = f"{LOLESPORTS_BASE_URL}/window/{game_id}"
-    data = _get_with_retry(url)
+
+    # Fase 1: si no conocemos el inicio del juego, determinarlo con query sin startingTime
+    if game_id not in _game_start_times:
+        data_init = _get_with_retry(url)   # sin params → frames desde inicio del juego
+        if data_init:
+            meta_init   = data_init.get("gameMetadata", {})
+            frames_init = data_init.get("frames", [])
+            # Intentar gameStartTime de metadata primero
+            start_str = meta_init.get("gameStartTime", "")
+            start_dt  = _parse_ts(start_str)
+            # Fallback: primer frame con gold=0 es el inicio del juego
+            if not start_dt and frames_init:
+                first_ts = _ts_from_frame(frames_init[0])
+                start_dt = _parse_ts(first_ts)
+            if start_dt:
+                _game_start_times[game_id] = start_dt
+                logger.info("Game start cacheado para %s: %s", game_id, start_dt.isoformat())
+
+    # Fase 2: query con startingTime para obtener frames actuales (últimos 3 min)
+    params = _current_window_params() if game_id in _game_start_times else None
+    data = _get_with_retry(url, params=params)
 
     if not data:
         return _fallback_golgg(game_id)
@@ -125,31 +171,31 @@ def get_live_stats(game_id: str) -> dict | None:
         frames   = data.get("frames", [])
 
         if not frames:
-            logger.info("gameId %s: sin frames aún.", game_id)
+            logger.info("gameId %s: sin frames aun.", game_id)
             return None
 
         frame = frames[-1]
         game_state = frame.get("gameState", "unknown")
 
         # Tiempo de juego en segundos
-        # NOTA: frame usa "rfc822Timestamp" (ej: "Thu, 02 Apr 2026 08:10:00 GMT")
-        # fromisoformat() NO puede parsear RFC 822 → usar _parse_ts() que maneja ambos.
+        # La API usa "rfc460Timestamp" (ISO-8601) — NO "rfc822Timestamp"
+        # gameStartTime ausente en metadata → usar _game_start_times cacheado
         game_time_s = 0
-        start_str    = metadata.get("gameStartTime", "")
-        frame_ts_str = frame.get("rfc822Timestamp", "")
-        start    = _parse_ts(start_str)
-        frame_ts = _parse_ts(frame_ts_str)
-        if start and frame_ts:
-            elapsed = (frame_ts - start).total_seconds()
+        start_dt     = _game_start_times.get(game_id)
+        frame_ts_str = _ts_from_frame(frame)
+        frame_ts     = _parse_ts(frame_ts_str)
+
+        if start_dt and frame_ts:
+            elapsed = (frame_ts - start_dt).total_seconds()
             if elapsed >= 0:
                 game_time_s = int(elapsed)
             else:
                 logger.debug("Timestamp negativo (frame antes de start): %.0f s", elapsed)
         else:
-            if not start:
-                logger.debug("gameStartTime no parseado: %r", start_str)
+            if not start_dt:
+                logger.debug("game start no disponible para gameId %s", game_id)
             if not frame_ts:
-                logger.debug("rfc822Timestamp no parseado: %r", frame_ts_str)
+                logger.debug("frame timestamp no parseado: %r", frame_ts_str)
 
         teams = frame.get("blueTeam", {}), frame.get("redTeam", {})
         # Algunos endpoints usan teams[] array
@@ -229,7 +275,7 @@ def extract_minute15_stats(game_id: str) -> dict | None:
     # Buscar el frame más cercano al minuto 15
     frames   = stats.get("all_frames", [])
     metadata = stats.get("metadata", {})
-    frame_15 = _find_minute15_frame(frames, metadata)
+    frame_15 = _find_minute15_frame(frames, metadata, game_id=game_id)
 
     if frame_15 is None:
         logger.warning("No se encontró frame del min 15 para gameId %s", game_id)
@@ -241,37 +287,41 @@ def extract_minute15_stats(game_id: str) -> dict | None:
     return result
 
 
-def _find_minute15_frame(frames: list, metadata: dict) -> dict | None:
-    """Retorna el frame más cercano al minuto 15 desde el inicio del juego."""
+def _find_minute15_frame(frames: list, metadata: dict, game_id: str = "") -> dict | None:
+    """
+    Retorna el frame más cercano al minuto 15 desde el inicio del juego.
+    Usa _game_start_times cacheado si gameStartTime no está en metadata.
+    Los frames usan rfc460Timestamp (ISO-8601).
+    """
+    # Obtener start time: metadata > cache > fallback por índice
     start_str = metadata.get("gameStartTime", "")
-    if not start_str:
-        # Sin gameStartTime, usar el frame a índice ~(15/0.5) ≈ 30 desde el inicio
+    start = _parse_ts(start_str)
+
+    if not start and game_id:
+        start = _game_start_times.get(game_id)
+
+    if not start:
+        # Sin start time, usar frame a índice ~30 como aproximación al min 15
         idx = min(30, len(frames) - 1)
         return frames[idx] if frames else None
-
-    try:
-        start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-    except Exception:
-        return frames[min(30, len(frames) - 1)] if frames else None
 
     target_s = MIN_GAME_MINUTE * 60  # 900 segundos
     best_frame = None
     best_diff  = float("inf")
 
     for frame in frames:
-        ts_str = frame.get("rfc822Timestamp", "")
+        ts_str = _ts_from_frame(frame)   # soporta rfc460Timestamp y rfc822Timestamp
         if not ts_str:
             continue
-        try:
-            ts   = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-            diff = abs((ts - start).total_seconds() - target_s)
-            if diff < best_diff:
-                best_diff  = diff
-                best_frame = frame
-        except Exception:
+        ts = _parse_ts(ts_str)
+        if not ts:
             continue
+        diff = abs((ts - start).total_seconds() - target_s)
+        if diff < best_diff:
+            best_diff  = diff
+            best_frame = frame
 
-    # Tolerancia: el frame más cercano debe estar a ≤ 5 minutos del min 15
+    # Tolerancia: el frame más cercano debe estar a <= 5 minutos del min 15
     if best_frame and best_diff <= 300:
         return best_frame
     return None

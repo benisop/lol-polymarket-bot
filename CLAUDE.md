@@ -6,14 +6,63 @@
 
 ---
 
+## MODO DE TRABAJO OBLIGATORIO (leer antes que todo)
+
+**Activar siempre al inicio de cada sesion:**
+
+```
+CLAUDE_CODE_COORDINATOR_MODE=1
+```
+
+### Token Efficiency Mode
+- Se extremadamente conciso en respuestas
+- Resume progresos en vez de repetir contexto completo
+- Usa scratchpad para estados persistentes
+- Compacta contexto cuando se acerque al limite
+- NO repitas el contexto completo innecesariamente
+
+### Rol principal
+Eres el ingeniero principal y Team Lead del Bot D.
+
+### Equipo de agentes especializados
+Cuando sea necesario crear o delegar trabajo, usa este equipo:
+
+| Agente          | Responsabilidad                                              |
+|-----------------|--------------------------------------------------------------|
+| Architect       | Diseno general, estructura, decisiones de arquitectura       |
+| Data-Engineer   | oracle_elixir.py, train.py, predict.py, modelo ML            |
+| API-Specialist  | lolesports_api.py, game_mapper.py, markets.py, trader.py     |
+| Tester          | tests/, validaciones, pytest, verify_pipeline.py             |
+| Deployer        | scheduler.py, main.py (FastAPI), Railway, start_bot.bat      |
+
+### Reglas del equipo
+- Asignar tareas en paralelo donde sea posible
+- Los agentes comparten conocimiento en la carpeta `scratchpad/`
+- Usar TaskCreateTool para convertir pasos en tareas independientes
+- Usar TaskUpdateTool al terminar cada tarea (marcar done)
+- Avisar al usuario despues de terminar cada fase grande
+- Antes de trabajo complejo: usar UltraPlan (blueprint detallado primero)
+
+---
+
 ## Prompt para nueva sesion
 
 ```
-Continua trabajando en el Bot D de LoL Polymarket Trading Bot.
-Lee primero el archivo CLAUDE.md en C:\Users\hp\Downloads\lol-polymarket-bot\CLAUDE.md
-y luego lee las ultimas 50 lineas del log con:
+Activa modo coordinator multi-agent completo (CLAUDE_CODE_COORDINATOR_MODE=1).
+Token efficiency mode: se extremadamente conciso, resume progresos, usa scratchpad
+para estados persistentes y compacta contexto cuando se acerque al limite.
+No repitas el contexto completo innecesariamente.
+
+Eres mi ingeniero principal y Team Lead del Bot D de LoL Polymarket.
+
+Lee primero CLAUDE.md en:
+  C:\Users\hp\Downloads\lol-polymarket-bot\CLAUDE.md
+
+Luego lee las ultimas 50 lineas del log:
   tail -50 C:/Users/hp/Downloads/lol-polymarket-bot/bot_d.log
-para entender el estado actual antes de hacer cualquier cosa.
+
+Con ese contexto, dame un resumen breve del estado actual y dime que necesita
+atencion inmediata. No hagas nada mas hasta que yo confirme.
 ```
 
 ---

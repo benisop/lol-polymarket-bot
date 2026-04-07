@@ -96,9 +96,11 @@ def _is_lol_market(market: dict) -> bool:
     if any(exc in slug for exc in ("worlds", "msi", "all-star")):
         return False
 
-    # LCK o LEC debe aparecer en question O en el título del evento padre
+    # LCK, LEC o EMEA Masters deben aparecer en question O en el título del evento padre
     combined = question + " " + event_title
-    if not (re.search(r'\blck\b', combined) or re.search(r'\blec\b', combined)):
+    if not (re.search(r'\blck\b', combined, re.IGNORECASE)
+            or re.search(r'\blec\b', combined, re.IGNORECASE)
+            or re.search(r'emea.masters', combined, re.IGNORECASE)):
         return False
 
     return True

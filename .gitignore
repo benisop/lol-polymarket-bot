@@ -18,8 +18,8 @@ build/
 *.db
 *.sqlite3
 
-# Modelo entrenado (regenerable con train_model.py)
-backend/model/model.pkl
+# Modelo entrenado — incluido en git para Railway
+# backend/model/model.pkl
 
 # Datos descargados (regenerables — caché local de Oracle's Elixir)
 data/oracle_elixir_cache/

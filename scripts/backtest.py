@@ -39,8 +39,8 @@ print(f"  LEC: {len(df[df['league']=='LEC'])}")
 # ── Simulación ────────────────────────────────────────────────────────────────
 BANKROLL       = 1000.0
 KELLY_FRACTION = 0.25
-MAX_POSITION   = 50.0
-MIN_EDGE       = 0.08
+MAX_POSITION   = 5.0
+MIN_EDGE       = 0.06
 MIN_EDGE_THRESHOLD = MIN_EDGE
 
 results = []

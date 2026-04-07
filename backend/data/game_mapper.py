@@ -46,6 +46,25 @@ TEAM_ALIASES: dict[str, str] = {
     "sandbox":       "Liiv SANDBOX",
     "fearx":         "FEARX",
     "fox":           "FEARX",
+    # LCK — variantes con sufijo numérico (Polymarket añade 1/2 en slugs de serie)
+    "hle1":          "Hanwha Life Esports",
+    "hle2":          "Hanwha Life Esports",
+    "fox1":          "FEARX",
+    "fox2":          "FEARX",
+    "foxy":          "FEARX",
+    "bro1":          "OKSavingsBank BRION",
+    "bro2":          "OKSavingsBank BRION",
+    # LCK Challengers League 2026
+    # getLive usa nombres como "HLE Challengers", "KRX Challengers", "T1 Academy", etc.
+    # Los aliases deben ser substrings de esos nombres (normeados)
+    "t1a":           "T1",          # getLive: "T1 Academy"       → norm "t1academy"
+    "dkc":           "Dplus",       # getLive: "DK Challengers"   → norm "dkchallengers"
+    "ktc":           "KT",          # getLive: "KT Challengers"   → norm "ktchallengers"
+    "nsea":          "Nongshim",    # getLive: "Nongshim Esports Academy" → norm contiene "nongshim"
+    "drxc":          "KRX",         # getLive: "KRX Challengers"  → norm "krxchallengers"
+    "dnsc":          "DN",          # getLive: "DN Challengers"   → norm contiene "dn"
+    "genga":         "Gen.G",       # getLive: "Gen.G Global Academy" → norm contiene "geng"
+    "foxy":          "BNK",         # getLive: "BNK FearX Youth"  → norm "bnkfearxyouth"
     # LEC 2026
     "g2":            "G2 Esports",
     "fnc":           "Fnatic",
@@ -62,16 +81,41 @@ TEAM_ALIASES: dict[str, str] = {
     "bds":           "Team BDS",
     "kc":            "Karmine Corp",
     "karmine":       "Karmine Corp",
-    "her":           "Heretics",
+    "gx":            "GiantX",
+    "giantx":        "GiantX",
+    "th":            "Team Heretics",
+    "her":           "Team Heretics",
     "heretics":      "Team Heretics",
+    "navi":          "Natus Vincere",
+    "shft":          "Shopify Rebellion",
+    # EMEA Masters 2026 — getLive usa nombres como "FF1", "BIG", "USE1", "ME1"
+    "ff1":           "FF1",
+    "big":           "BIG",
+    "big1":          "BIG",
+    "use1":          "USE1",
+    "me1":           "ME1",
+    "koi":           "KOI",
+    "heretics":      "Team Heretics",
+    "gam":           "GAM Esports",
+    "fut":           "FUT Esports",
+    "gam1":          "GAM Esports",
+    "fut1":          "FUT Esports",
 }
 
 # Slugs de equipos LCK conocidos para detección de liga
-LCK_SLUG_TOKENS = {"t1","geng","gen","kdf","freecs","drx","kt","ns","dk","dplus",
-                    "dnf","dn","brion","hle","hanwha","lsb","fearx","fox"}
+LCK_SLUG_TOKENS = {
+    "t1","geng","gen","kdf","freecs","drx","kt","ns","dk","dplus",
+    "dnf","dn","brion","hle","hanwha","lsb","fearx","fox",
+    # variantes con sufijo / LCK CL
+    "hle1","hle2","fox1","fox2","foxy","bro1","bro2",
+    "dkc","ktc","nsea","drxc","dnsc",
+}
 # Slugs de equipos LEC conocidos
-LEC_SLUG_TOKENS = {"g2","fnc","fnatic","vit","vitality","mkoi","mad","sk","rge",
-                    "xl","ast","bds","kc","karmine","her","heretics"}
+LEC_SLUG_TOKENS = {
+    "g2","fnc","fnatic","vit","vitality","mkoi","mad","sk","rge",
+    "xl","ast","bds","kc","karmine","her","heretics",
+    "gx","giantx","th","navi","shft",
+}
 
 # Headers necesarios para la API de Riot Esports
 SCHEDULE_HEADERS = {
@@ -152,12 +196,16 @@ def parse_slug(slug: str) -> dict | None:
         logger.warning("No se pudieron extraer dos equipos de: %s", slug)
         return None
 
-    team1 = _normalize_team(parts[0].strip("-"))
-    team2 = _normalize_team(parts[1].strip("-"))
+    raw1  = parts[0].strip("-").lower()
+    raw2  = parts[1].strip("-").lower()
+    team1 = _normalize_team(raw1)
+    team2 = _normalize_team(raw2)
 
     return {
         "team1":    team1,
         "team2":    team2,
+        "raw1":     raw1,
+        "raw2":     raw2,
         "date":     date_str,
         "game_num": game_num,
         "league":   league,
@@ -191,7 +239,7 @@ def refresh_live_cache() -> None:
         _live_cache = []
 
 
-def _get_live_game_id(team1: str, team2: str, league: str | None) -> str | None:
+def _get_live_game_id(team1: str, team2: str, league: str | None, raw1: str = "", raw2: str = "") -> str | None:
     """
     Consulta getLive para encontrar el gameId de un partido en curso.
     Es la UNICA fuente que retorna gameIds reales (getSchedule siempre devuelve []).
@@ -203,6 +251,8 @@ def _get_live_game_id(team1: str, team2: str, league: str | None) -> str | None:
 
     t1 = _norm(team1)
     t2 = _norm(team2)
+    r1 = _norm(raw1)
+    r2 = _norm(raw2)
 
     try:
         # Usar cache del ciclo — NO hacer HTTP request por cada mercado
@@ -210,24 +260,38 @@ def _get_live_game_id(team1: str, team2: str, league: str | None) -> str | None:
             refresh_live_cache()
         events = _live_cache
 
+        if not events:
+            logger.info("getLive: sin partidos en vivo ahora.")
+            return None
+
+        live_teams = []
         for event in events:
+            match = event.get("match", {})
+            teams = match.get("teams", [])
+            if len(teams) >= 2:
+                live_teams.append(
+                    f"{teams[0].get('name','?')} vs {teams[1].get('name','?')} "
+                    f"[{event.get('league',{}).get('slug','?')}]"
+                )
+
             # Filtrar por liga si conocemos cuál es
             if league:
                 event_league = event.get("league", {}).get("slug", "").upper()
                 if league not in event_league and event_league not in league:
                     continue
 
-            match = event.get("match", {})
-            teams = match.get("teams", [])
             if len(teams) < 2:
                 continue
 
             e_t1 = _norm(teams[0].get("name", ""))
             e_t2 = _norm(teams[1].get("name", ""))
+            def _m(cand: str, raw: str, et: str) -> bool:
+                return cand in et or et in cand or (bool(raw) and raw in et)
+
             teams_match = (
-                (t1 in e_t1 or e_t1 in t1) and (t2 in e_t2 or e_t2 in t2)
+                _m(t1, r1, e_t1) and _m(t2, r2, e_t2)
             ) or (
-                (t1 in e_t2 or e_t2 in t1) and (t2 in e_t1 or e_t1 in t2)
+                _m(t1, r1, e_t2) and _m(t2, r2, e_t1)
             )
             if not teams_match:
                 continue
@@ -243,8 +307,19 @@ def _get_live_game_id(team1: str, team2: str, league: str | None) -> str | None:
                     )
                     return str(gid)
 
-            # Si no hay game activo, loguear que está en schedule pero no empezó
-            logger.debug("getLive: %s vs %s encontrado pero sin game activo.", team1, team2)
+            # Partido encontrado pero no activo aún
+            logger.info(
+                "getLive: %s vs %s encontrado pero sin game activo (scheduled/completed).",
+                team1, team2,
+            )
+            return None
+
+        # No se encontró el partido en getLive — loguear qué hay en vivo
+        logger.info(
+            "getLive: %s vs %s NO encontrado. Partidos en vivo ahora: %s",
+            team1, team2,
+            live_teams if live_teams else "ninguno",
+        )
 
     except Exception as exc:
         logger.error("Error getLive: %s", exc)
@@ -345,7 +420,9 @@ def get_game_id(slug: str) -> str | None:
 
     # 3. getLive — única fuente fiable de gameIds en tiempo real
     # Si el partido no está live, retorna None inmediatamente (sin más API calls)
-    game_id = _get_live_game_id(team1, team2, league)
+    game_id = _get_live_game_id(team1, team2, league,
+                                raw1=parsed.get("raw1", ""),
+                                raw2=parsed.get("raw2", ""))
 
     # 6. Cachear si encontramos
     if game_id:

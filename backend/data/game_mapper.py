@@ -19,7 +19,6 @@ from backend.database import get_cached_game_id, cache_game_id
 logger = logging.getLogger(__name__)
 
 # ── Aliases de equipos ─────────────────────────────────────────────────────────
-# Normaliza el nombre en el slug al nombre oficial de Riot/Leaguepedia
 TEAM_ALIASES: dict[str, str] = {
     # LCK
     "t1":            "T1",
@@ -27,8 +26,9 @@ TEAM_ALIASES: dict[str, str] = {
     "gen-g":         "Gen.G",
     "gen":           "Gen.G",
     "kdf":           "Kwangdong Freecs",
+    "freecs":        "Kwangdong Freecs",
     "kwangdong":     "Kwangdong Freecs",
-    "drx":           "DRX",
+    "drx":           "Kiwoom DRX",
     "kt":            "KT Rolster",
     "kt-rolster":    "KT Rolster",
     "ns":            "Nongshim RedForce",
@@ -36,33 +36,42 @@ TEAM_ALIASES: dict[str, str] = {
     "dk":            "Dplus KIA",
     "dplus":         "Dplus KIA",
     "dplus-kia":     "Dplus KIA",
+    "dnf":           "DN SOOPers",
+    "dn":            "DN SOOPers",
     "ok":            "OKSavingsBank BRION",
-    "brion":         "OKSavingsBank BRION",
+    "brion":         "BRION",
     "hle":           "Hanwha Life Esports",
     "hanwha":        "Hanwha Life Esports",
     "lsb":           "Liiv SANDBOX",
     "sandbox":       "Liiv SANDBOX",
-    # LEC
+    "fearx":         "FEARX",
+    "fox":           "FEARX",
+    # LEC 2026
     "g2":            "G2 Esports",
     "fnc":           "Fnatic",
     "fnatic":        "Fnatic",
-    "vitality":      "Team Vitality",
     "vit":           "Team Vitality",
+    "vitality":      "Team Vitality",
+    "mkoi":          "MAD Lions KOI",
     "mad":           "MAD Lions KOI",
     "mad-lions":     "MAD Lions KOI",
     "sk":            "SK Gaming",
-    "sk-gaming":     "SK Gaming",
     "rge":           "Rogue",
-    "rogue":         "Rogue",
     "xl":            "Excel Esports",
-    "excel":         "Excel Esports",
-    "astralis":      "Astralis",
     "ast":           "Astralis",
     "bds":           "Team BDS",
-    "team-bds":      "Team BDS",
-    "karmine":       "Karmine Corp",
     "kc":            "Karmine Corp",
+    "karmine":       "Karmine Corp",
+    "her":           "Heretics",
+    "heretics":      "Team Heretics",
 }
+
+# Slugs de equipos LCK conocidos para detección de liga
+LCK_SLUG_TOKENS = {"t1","geng","gen","kdf","freecs","drx","kt","ns","dk","dplus",
+                    "dnf","dn","brion","hle","hanwha","lsb","fearx","fox"}
+# Slugs de equipos LEC conocidos
+LEC_SLUG_TOKENS = {"g2","fnc","fnatic","vit","vitality","mkoi","mad","sk","rge",
+                    "xl","ast","bds","kc","karmine","her","heretics"}
 
 # Headers necesarios para la API de Riot Esports
 SCHEDULE_HEADERS = {
@@ -95,12 +104,18 @@ def parse_slug(slug: str) -> dict | None:
     """
     slug = slug.lower()
 
-    # Detectar liga
+    # Detectar liga por prefijo explícito o por tokens de equipos conocidos
     league = None
     if "lck" in slug:
         league = "LCK"
     elif "lec" in slug:
         league = "LEC"
+    else:
+        tokens = set(re.split(r"[-_]", slug))
+        if tokens & LCK_SLUG_TOKENS:
+            league = "LCK"
+        elif tokens & LEC_SLUG_TOKENS:
+            league = "LEC"
 
     # Extraer fecha YYYY-MM-DD (opcional en los nuevos formatos)
     date_match = re.search(r"(\d{4})-(\d{2})-(\d{2})", slug)
@@ -149,107 +164,90 @@ def parse_slug(slug: str) -> dict | None:
     }
 
 
-# ── Consulta al schedule de LoL Esports API ────────────────────────────────────
+# ── getLive: única fuente fiable de gameIds ────────────────────────────────────
 
-def _fetch_schedule(league_id: str, pages: int = 3) -> list[dict]:
-    """
-    Descarga el schedule de una liga de Riot Esports API.
-    Sigue el paginado hasta 'pages' páginas hacia atrás/adelante.
-    """
-    events: list[dict] = []
-    page_token: str | None = None
-
-    for _ in range(pages):
-        params: dict = {"hl": "en-US", "leagueId": league_id}
-        if page_token:
-            params["pageToken"] = page_token
-
-        try:
-            resp = requests.get(
-                LOLESPORTS_SCHEDULE_URL,
-                headers=SCHEDULE_HEADERS,
-                params=params,
-                timeout=15,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            schedule = data.get("data", {}).get("schedule", {})
-            events.extend(schedule.get("events", []))
-            page_token = schedule.get("pages", {}).get("newer")
-            if not page_token:
-                break
-        except Exception as exc:
-            logger.error("Error fetch schedule league %s: %s", league_id, exc)
-            break
-
-        time.sleep(0.5)
-
-    return events
+# Cache de getLive por ciclo — se llama UNA VEZ y se reutiliza para todos los mercados
+_live_cache: list[dict] = []
+_live_cache_ts: float = 0.0
+LIVE_CACHE_TTL: float = 240.0   # válido por 4 minutos (un ciclo completo)
 
 
-def _match_event(
-    events: list[dict], team1: str, team2: str, date_str: str, game_num: int
-) -> str | None:
-    """
-    Busca en los eventos el gameId que corresponde a los equipos y fecha.
-    Tolerancia de ±1 día para cubrir diferencias de zona horaria.
-    """
-    target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-
-    # Normalizar nombres para comparación flexible
-    def _norm(name: str) -> str:
-        return re.sub(r"[^a-z0-9]", "", name.lower())
-
-    t1_norm = _norm(team1)
-    t2_norm = _norm(team2)
-
-    for event in events:
-        if event.get("type") != "match":
-            continue
-
-        match = event.get("match", {})
-        teams = match.get("teams", [])
-        if len(teams) < 2:
-            continue
-
-        e_t1 = _norm(teams[0].get("name", ""))
-        e_t2 = _norm(teams[1].get("name", ""))
-
-        # Comprobar que los equipos coinciden (en cualquier orden)
-        teams_match = (
-            (t1_norm in e_t1 or e_t1 in t1_norm) and
-            (t2_norm in e_t2 or e_t2 in t2_norm)
-        ) or (
-            (t1_norm in e_t2 or e_t2 in t1_norm) and
-            (t2_norm in e_t1 or e_t1 in t2_norm)
+def refresh_live_cache() -> None:
+    """Llama a getLive UNA vez y guarda el resultado. Llamar al inicio de cada ciclo."""
+    global _live_cache, _live_cache_ts
+    try:
+        resp = requests.get(
+            "https://esports-api.lolesports.com/persisted/gw/getLive",
+            headers=SCHEDULE_HEADERS,
+            params={"hl": "en-US"},
+            timeout=15,
         )
-        if not teams_match:
-            continue
+        resp.raise_for_status()
+        _live_cache = resp.json().get("data", {}).get("schedule", {}).get("events", [])
+        _live_cache_ts = time.time()
+        logger.info("getLive cache: %d partidos en vivo.", len(_live_cache))
+    except Exception as exc:
+        logger.error("Error refreshing live cache: %s", exc)
+        _live_cache = []
 
-        # Comprobar fecha (tolerancia ±1 día por zonas horarias)
-        start_time_str = event.get("startTime", "")
-        if start_time_str:
-            try:
-                event_date = datetime.fromisoformat(
-                    start_time_str.replace("Z", "+00:00")
-                ).date()
-                if abs((event_date - target_date).days) > 1:
+
+def _get_live_game_id(team1: str, team2: str, league: str | None) -> str | None:
+    """
+    Consulta getLive para encontrar el gameId de un partido en curso.
+    Es la UNICA fuente que retorna gameIds reales (getSchedule siempre devuelve []).
+
+    Retorna el gameId del game en estado 'inProgress' o 'paused', o None.
+    """
+    def _norm(s: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", s.lower())
+
+    t1 = _norm(team1)
+    t2 = _norm(team2)
+
+    try:
+        # Usar cache del ciclo — NO hacer HTTP request por cada mercado
+        if time.time() - _live_cache_ts > LIVE_CACHE_TTL:
+            refresh_live_cache()
+        events = _live_cache
+
+        for event in events:
+            # Filtrar por liga si conocemos cuál es
+            if league:
+                event_league = event.get("league", {}).get("slug", "").upper()
+                if league not in event_league and event_league not in league:
                     continue
-            except Exception:
-                pass
 
-        # Obtener el gameId del game N dentro del match
-        games = match.get("games", [])
-        # game_num es 1-indexed
-        idx = min(game_num - 1, len(games) - 1)
-        if games:
-            game_id = games[idx].get("id")
-            if game_id:
-                logger.info(
-                    "Match encontrado: %s vs %s (%s) → gameId=%s",
-                    team1, team2, date_str, game_id,
-                )
-                return str(game_id)
+            match = event.get("match", {})
+            teams = match.get("teams", [])
+            if len(teams) < 2:
+                continue
+
+            e_t1 = _norm(teams[0].get("name", ""))
+            e_t2 = _norm(teams[1].get("name", ""))
+            teams_match = (
+                (t1 in e_t1 or e_t1 in t1) and (t2 in e_t2 or e_t2 in t2)
+            ) or (
+                (t1 in e_t2 or e_t2 in t1) and (t2 in e_t1 or e_t1 in t2)
+            )
+            if not teams_match:
+                continue
+
+            # Buscar el game activo (inProgress o paused)
+            for game in match.get("games", []):
+                state = game.get("state", "")
+                gid = game.get("id")
+                if gid and state in ("inProgress", "paused"):
+                    logger.info(
+                        "getLive: %s vs %s → gameId=%s (state=%s)",
+                        team1, team2, gid, state,
+                    )
+                    return str(gid)
+
+            # Si no hay game activo, loguear que está en schedule pero no empezó
+            logger.debug("getLive: %s vs %s encontrado pero sin game activo.", team1, team2)
+
+    except Exception as exc:
+        logger.error("Error getLive: %s", exc)
 
     return None
 
@@ -258,32 +256,44 @@ def _match_event(
 
 def _leaguepedia_fallback(team1: str, team2: str, date_str: str) -> str | None:
     """
-    Consulta Leaguepedia (lol.fandom.com) como fallback para obtener gameId.
-    Usa la Cargo API pública.
+    Consulta Leaguepedia (lol.fandom.com) como fallback para obtener el
+    RiotGameId numérico (no el GameId de página wiki).
     """
     try:
         url = "https://lol.fandom.com/api.php"
-        params = {
-            "action":  "cargoquery",
-            "tables":  "MatchSchedule=MS,MatchScheduleGame=MSG",
-            "join_on": "MS.MatchId=MSG.MatchId",
-            "fields":  "MSG.GameId,MS.Team1,MS.Team2,MS.DateTime_UTC",
-            "where":   (
-                f"(MS.Team1 LIKE '%{team1}%' OR MS.Team2 LIKE '%{team1}%') "
-                f"AND (MS.Team1 LIKE '%{team2}%' OR MS.Team2 LIKE '%{team2}%') "
-                f"AND MS.DateTime_UTC LIKE '{date_str}%'"
-            ),
-            "limit":   "5",
-            "format":  "json",
-        }
-        resp = requests.get(url, params=params, timeout=15)
-        resp.raise_for_status()
-        results = resp.json().get("cargoquery", [])
-        if results:
-            game_id = results[0].get("title", {}).get("GameId")
-            if game_id:
-                logger.info("Leaguepedia fallback → gameId=%s", game_id)
-                return game_id
+        # Intentar con fecha exacta primero, luego sin fecha (pre-partido)
+        for date_filter in [f"AND MS.DateTime_UTC LIKE '{date_str}%'", ""]:
+            params = {
+                "action":  "cargoquery",
+                "tables":  "MatchSchedule=MS,MatchScheduleGame=MSG",
+                "join_on": "MS.MatchId=MSG.MatchId",
+                "fields":  "MSG.RiotGameId,MSG.GameId,MS.Team1,MS.Team2,MS.DateTime_UTC",
+                "where":   (
+                    f"(MS.Team1 LIKE '%{team1}%' OR MS.Team2 LIKE '%{team1}%') "
+                    f"AND (MS.Team1 LIKE '%{team2}%' OR MS.Team2 LIKE '%{team2}%') "
+                    + date_filter
+                ),
+                "order_by": "MS.DateTime_UTC DESC",
+                "limit":    "5",
+                "format":   "json",
+            }
+            resp = requests.get(url, params=params, timeout=15)
+            resp.raise_for_status()
+            results = resp.json().get("cargoquery", [])
+            for row in results:
+                title = row.get("title", {})
+                # RiotGameId es el numérico real para feed.lolesports.com
+                riot_id = title.get("RiotGameId", "").strip()
+                if riot_id and riot_id.isdigit():
+                    logger.info("Leaguepedia fallback → RiotGameId=%s", riot_id)
+                    return riot_id
+                # Fallback al GameId de wiki si no hay RiotGameId todavía
+                wiki_id = title.get("GameId", "").strip()
+                if wiki_id:
+                    logger.warning(
+                        "Leaguepedia: solo GameId wiki disponible (partido no empezó?): %s",
+                        wiki_id,
+                    )
     except Exception as exc:
         logger.error("Leaguepedia fallback falló: %s", exc)
     return None
@@ -333,23 +343,9 @@ def get_game_id(slug: str) -> str | None:
         team1, team2, date_str, game_num, league,
     )
 
-    # 3-4. Consultar Riot API para cada liga relevante
-    game_id = None
-    league_ids_to_check = (
-        [LEAGUE_IDS[league]] if league and league in LEAGUE_IDS
-        else list(LEAGUE_IDS.values())
-    )
-
-    for league_id in league_ids_to_check:
-        events = _fetch_schedule(league_id)
-        game_id = _match_event(events, team1, team2, date_str, game_num)
-        if game_id:
-            break
-
-    # 5. Fallback Leaguepedia
-    if not game_id:
-        logger.info("Riot API no encontró match, probando Leaguepedia …")
-        game_id = _leaguepedia_fallback(team1, team2, date_str)
+    # 3. getLive — única fuente fiable de gameIds en tiempo real
+    # Si el partido no está live, retorna None inmediatamente (sin más API calls)
+    game_id = _get_live_game_id(team1, team2, league)
 
     # 6. Cachear si encontramos
     if game_id:

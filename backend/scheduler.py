@@ -136,6 +136,10 @@ def _run_cycle() -> dict:
         "errors":          0,
     }
 
+    # ── 0. Refrescar cache de partidos en vivo (1 sola llamada HTTP por ciclo)
+    from backend.data.game_mapper import refresh_live_cache
+    refresh_live_cache()
+
     # ── 1. Mercados activos ────────────────────────────────────────────────────
     markets = get_lol_markets()
     cycle_stats["markets_checked"] = len(markets)

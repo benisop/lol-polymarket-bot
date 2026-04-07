@@ -11,6 +11,7 @@ Endpoints:
 import logging
 import time
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from functools import lru_cache
 
 import requests
@@ -21,12 +22,33 @@ logger = logging.getLogger(__name__)
 
 # ── Configuración ──────────────────────────────────────────────────────────────
 MAX_RETRIES      = 3
-RATE_LIMIT_SECS  = 30       # mínimo entre requests al mismo gameId
+RATE_LIMIT_SECS  = 10       # mínimo entre requests al mismo gameId
 MIN_GAME_MINUTE  = 15       # minuto objetivo para el modelo
 MAX_GAME_MINUTE  = 25       # pasado este minuto, modelo no es fiable
 
 # Caché simple de timestamps para rate limiting por gameId
 _last_request: dict[str, float] = {}
+
+# Caché de resultados por ciclo — evita múltiples HTTP calls al mismo gameId
+_stats_cache: dict[str, tuple[float, dict | None]] = {}   # gameId → (ts, result)
+STATS_CACHE_TTL = 60.0   # reusar resultado si tiene menos de 60 segundos
+
+
+def _parse_ts(ts_str: str) -> datetime | None:
+    """
+    Parsea timestamp en formato ISO-8601 O RFC 822 (usado por Riot feed API).
+    fromisoformat() falla con RFC 822 — usamos email.utils como fallback.
+    """
+    if not ts_str:
+        return None
+    try:
+        return datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+    except ValueError:
+        pass
+    try:
+        return parsedate_to_datetime(ts_str)
+    except Exception:
+        return None
 
 
 def _rate_limit(game_id: str) -> None:
@@ -110,16 +132,24 @@ def get_live_stats(game_id: str) -> dict | None:
         game_state = frame.get("gameState", "unknown")
 
         # Tiempo de juego en segundos
+        # NOTA: frame usa "rfc822Timestamp" (ej: "Thu, 02 Apr 2026 08:10:00 GMT")
+        # fromisoformat() NO puede parsear RFC 822 → usar _parse_ts() que maneja ambos.
         game_time_s = 0
-        start_str = metadata.get("gameStartTime", "")
+        start_str    = metadata.get("gameStartTime", "")
         frame_ts_str = frame.get("rfc822Timestamp", "")
-        if start_str and frame_ts_str:
-            try:
-                start  = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-                frame_ts = datetime.fromisoformat(frame_ts_str.replace("Z", "+00:00"))
-                game_time_s = int((frame_ts - start).total_seconds())
-            except Exception:
-                pass
+        start    = _parse_ts(start_str)
+        frame_ts = _parse_ts(frame_ts_str)
+        if start and frame_ts:
+            elapsed = (frame_ts - start).total_seconds()
+            if elapsed >= 0:
+                game_time_s = int(elapsed)
+            else:
+                logger.debug("Timestamp negativo (frame antes de start): %.0f s", elapsed)
+        else:
+            if not start:
+                logger.debug("gameStartTime no parseado: %r", start_str)
+            if not frame_ts:
+                logger.debug("rfc822Timestamp no parseado: %r", frame_ts_str)
 
         teams = frame.get("blueTeam", {}), frame.get("redTeam", {})
         # Algunos endpoints usan teams[] array
@@ -169,8 +199,15 @@ def extract_minute15_stats(game_id: str) -> dict | None:
         goldrelat15, xprelat15, firstdragon, csrelat15,
         killsrelat15, firstblood, firstherald
     """
+    # Cache: si ya calculamos para este gameId en los últimos 60 segundos, reusar
+    cached_ts, cached_result = _stats_cache.get(game_id, (0.0, None))
+    if time.time() - cached_ts < STATS_CACHE_TTL:
+        logger.debug("Stats cache hit para gameId %s", game_id)
+        return cached_result
+
     stats = get_live_stats(game_id)
     if not stats:
+        _stats_cache[game_id] = (time.time(), None)
         return None
 
     game_time_s  = stats["game_time_s"]
@@ -182,9 +219,11 @@ def extract_minute15_stats(game_id: str) -> dict | None:
     # Ventana de operación: [15, 25] minutos
     if game_time_m < MIN_GAME_MINUTE:
         logger.info("Partido en min %.1f — aún no llegó al min 15.", game_time_m)
+        # No cachear — el tiempo avanza, próximo ciclo puede ser min 15+
         return None
     if game_time_m > MAX_GAME_MINUTE:
         logger.info("Partido en min %.1f — ya pasó el min 25, modelo no fiable.", game_time_m)
+        _stats_cache[game_id] = (time.time(), None)
         return None
 
     # Buscar el frame más cercano al minuto 15
@@ -194,9 +233,12 @@ def extract_minute15_stats(game_id: str) -> dict | None:
 
     if frame_15 is None:
         logger.warning("No se encontró frame del min 15 para gameId %s", game_id)
+        _stats_cache[game_id] = (time.time(), None)
         return None
 
-    return _compute_features(frame_15, metadata)
+    result = _compute_features(frame_15, metadata)
+    _stats_cache[game_id] = (time.time(), result)
+    return result
 
 
 def _find_minute15_frame(frames: list, metadata: dict) -> dict | None:
